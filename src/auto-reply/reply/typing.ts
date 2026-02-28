@@ -18,6 +18,7 @@ export function createTypingController(params: {
   onCleanup?: () => void;
   typingIntervalSeconds?: number;
   typingTtlMs?: number;
+  maxAbsoluteDurationMs?: number;
   silentToken?: string;
   log?: (message: string) => void;
 }): TypingController {
@@ -26,6 +27,7 @@ export function createTypingController(params: {
     onCleanup,
     typingIntervalSeconds = 6,
     typingTtlMs = 2 * 60_000,
+    maxAbsoluteDurationMs = 5 * 60_000,
     silentToken = SILENT_REPLY_TOKEN,
     log,
   } = params;
@@ -38,6 +40,10 @@ export function createTypingController(params: {
   // Once we stop typing, we "seal" the controller so late events can't restart typing forever.
   let sealed = false;
   let typingTtlTimer: NodeJS.Timeout | undefined;
+  // Hard safety net: monotonic deadline set when typing first activates.
+  // refreshTypingTtl() checks this and refuses to extend the TTL past it,
+  // so the existing soft TTL expires naturally — no second timer needed.
+  let absoluteDeadline: number | undefined;
   const typingIntervalMs = typingIntervalSeconds * 1000;
 
   const formatTypingTtl = (ms: number) => {
@@ -86,6 +92,13 @@ export function createTypingController(params: {
     if (typingTtlMs <= 0) {
       return;
     }
+    // Past the absolute deadline — stop refreshing and let the current TTL expire.
+    if (absoluteDeadline !== undefined && Date.now() >= absoluteDeadline) {
+      log?.(
+        `typing absolute max duration reached (${formatTypingTtl(maxAbsoluteDurationMs)}); TTL refresh blocked`,
+      );
+      return;
+    }
     if (typingTtlTimer) {
       clearTimeout(typingTtlTimer);
     }
@@ -127,6 +140,11 @@ export function createTypingController(params: {
     }
     if (!active) {
       active = true;
+      // Record monotonic deadline on first activation. refreshTypingTtl()
+      // will refuse to extend the TTL once this deadline passes.
+      if (maxAbsoluteDurationMs > 0 && absoluteDeadline === undefined) {
+        absoluteDeadline = Date.now() + maxAbsoluteDurationMs;
+      }
     }
     if (started) {
       return;
